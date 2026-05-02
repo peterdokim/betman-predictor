@@ -1,0 +1,2 @@
+"""Betman betting predictor package."""
+
