@@ -17,6 +17,16 @@ MARKETS: dict[str, MarketDefinition] = {
         recency_decay=0.999,
         min_same_league_samples=28,
         prior_weight=3.0,
+        # Starting points based on widely-cited home-advantage studies (Pollard 2008,
+        # FiveThirtyEight global club rating set). Tune via backtest later.
+        league_overrides={
+            "52": {"home_advantage": 60.0, "bandwidth": 95.0},   # EPL
+            "2":  {"home_advantage": 70.0, "bandwidth": 90.0},   # English Championship
+            "56": {"home_advantage": 65.0, "bandwidth": 90.0},   # Bundesliga
+            "53": {"home_advantage": 55.0, "bandwidth": 95.0},   # Serie A
+            "54": {"home_advantage": 60.0, "bandwidth": 95.0},   # La Liga
+            "67": {"home_advantage": 55.0, "bandwidth": 100.0},  # Ligue 1
+        },
     ),
     "baseball": MarketDefinition(
         key="baseball",

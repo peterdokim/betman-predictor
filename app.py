@@ -16,9 +16,12 @@ from betman_predictor.double_chance import (
     select_double_chances,
     stake_breakdown,
 )
+from betman_predictor.external_data import build_preseed
+from betman_predictor.lineup_adjust import LineupAdjuster
 from betman_predictor.ml_predictor import (
     MLConfig,
     MLPredictor,
+    OddsLookup,
     VoteLookup,
     ensemble_predictions,
     sklearn_available,
@@ -135,7 +138,88 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="if >0, print only the N most-confident picks from the round (use 3 or 4 for focused stake)",
     )
+    parser.add_argument(
+        "--match-seqs",
+        type=str,
+        default="",
+        help="comma-separated match seqs to keep in the report (e.g. '4,9,14' for a 3-game parlay). Applied after --top-n / --double-chance-count.",
+    )
+    # Soccer-focused improvements (no-ops when the relevant data file is missing).
+    parser.add_argument(
+        "--lineup-players",
+        default=None,
+        help="path to JSON: {league_code: {team_name: {player_name: elo_value}}}",
+    )
+    parser.add_argument(
+        "--lineup-missing",
+        default=None,
+        help="path to JSON: {gm_ts: {match_seq: {home_missing: [...], away_missing: [...]}}}",
+    )
+    parser.add_argument(
+        "--external-history-dir",
+        default=None,
+        help="directory of football-data.co.uk CSVs to pre-seed Elo ratings (soccer only)",
+    )
+    parser.add_argument(
+        "--odds-file",
+        default=None,
+        help="path to JSON: {gm_ts: {match_seq: {A: prob, B: prob, D: prob}}} for closing-odds blend (ML only)",
+    )
+    parser.add_argument(
+        "--odds-weight",
+        type=float,
+        default=0.0,
+        help="weight (0..1) of closing-odds in geometric blend with ML model (0 = disabled)",
+    )
+    parser.add_argument(
+        "--no-calibrate",
+        action="store_true",
+        help="disable isotonic per-class calibration on a holdout fold",
+    )
     return parser.parse_args()
+
+
+def load_odds_lookup(path: str | None) -> OddsLookup:
+    if not path:
+        return {}
+    odds_path = Path(path)
+    if not odds_path.exists():
+        progress(f"  [warn] --odds-file '{path}' not found; skipping closing-odds blend")
+        return {}
+    with odds_path.open(encoding="utf-8") as handle:
+        raw = json.load(handle)
+    out: OddsLookup = {}
+    for gm_ts, round_block in (raw or {}).items():
+        try:
+            ts_int = int(gm_ts)
+        except (TypeError, ValueError):
+            continue
+        for match_seq, codes in (round_block or {}).items():
+            try:
+                seq_int = int(match_seq)
+            except (TypeError, ValueError):
+                continue
+            cleaned = {str(k): float(v) for k, v in (codes or {}).items()}
+            total = sum(cleaned.values())
+            if total > 0:
+                cleaned = {k: v / total for k, v in cleaned.items()}
+                out[(ts_int, seq_int)] = cleaned
+    return out
+
+
+def parse_match_seqs(raw: str) -> set[int]:
+    if not raw.strip():
+        return set()
+    seqs: set[int] = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            seqs.add(int(token))
+        except ValueError as exc:
+            raise SystemExit(f"--match-seqs got non-integer token '{token}'") from exc
+    return seqs
 
 
 def resolve_market_keys(raw_market: str) -> list[str]:
@@ -261,6 +345,12 @@ def run_market(
     enrich_features: bool,
     enrich_workers: int,
     top_n: int,
+    match_seqs: set[int],
+    lineup_adjuster: LineupAdjuster | None = None,
+    preseed_by_name: dict[str, dict[str, float]] | None = None,
+    odds_lookup: OddsLookup | None = None,
+    odds_weight: float = 0.0,
+    calibrate: bool = True,
 ) -> dict[str, Any]:
     target_round = choose_target_round(client, market, override_round, refresh)
     history_rounds = history_override or market.default_history_rounds
@@ -315,8 +405,23 @@ def run_market(
         ml_algo=ml_algo,
         ensemble_weight=ensemble_weight,
         enricher=training_enricher,
+        lineup_adjuster=lineup_adjuster,
+        preseed_by_name=preseed_by_name,
+        odds_lookup=odds_lookup,
+        odds_weight=odds_weight,
+        calibrate=calibrate,
     )
-    bet_plan = select_double_chances(market, predictions, double_chance_count)
+    if match_seqs:
+        scoped_predictions = [p for p in predictions if p.match.match_seq in match_seqs]
+        if not scoped_predictions:
+            progress(
+                f"  [warn] --match-seqs filter removed every match. Available seqs: "
+                f"{sorted(p.match.match_seq for p in predictions)}"
+            )
+    else:
+        scoped_predictions = predictions
+
+    bet_plan = select_double_chances(market, scoped_predictions, double_chance_count)
     if top_n > 0:
         bet_plan = sorted(bet_plan, key=lambda item: item.bet_probability, reverse=True)[:top_n]
         bet_plan = sorted(bet_plan, key=lambda item: item.prediction.match.match_seq)
@@ -411,24 +516,62 @@ def build_predictions(
     ml_algo: str,
     ensemble_weight: float,
     enricher: BaseballEnricher | None = None,
+    lineup_adjuster: LineupAdjuster | None = None,
+    preseed_by_name: dict[str, dict[str, float]] | None = None,
+    odds_lookup: OddsLookup | None = None,
+    odds_weight: float = 0.0,
+    calibrate: bool = True,
 ) -> list:
+    ml_config = MLConfig(algorithm=ml_algo, calibrate=calibrate)
+    odds_lookup = odds_lookup or {}
+
     if model_choice == "elo":
-        elo_predictor = HistoricalPredictor(market)
+        elo_predictor = HistoricalPredictor(
+            market,
+            lineup_adjuster=lineup_adjuster,
+            preseed_by_name=preseed_by_name,
+        )
         elo_predictor.fit(history_matches)
         return elo_predictor.predict_round(target_matches)
 
     if model_choice == "ml":
-        ml_predictor = MLPredictor(market, MLConfig(algorithm=ml_algo), enricher=enricher)
+        ml_predictor = MLPredictor(
+            market,
+            ml_config,
+            enricher=enricher,
+            lineup_adjuster=lineup_adjuster,
+            preseed_by_name=preseed_by_name,
+        )
         ml_predictor.fit(history_matches, vote_lookup=vote_lookup)
-        return ml_predictor.predict_round(target_matches, vote_lookup=vote_lookup)
+        return ml_predictor.predict_round(
+            target_matches,
+            vote_lookup=vote_lookup,
+            odds_lookup=odds_lookup,
+            odds_weight=odds_weight,
+        )
 
-    elo_predictor = HistoricalPredictor(market)
+    elo_predictor = HistoricalPredictor(
+        market,
+        lineup_adjuster=lineup_adjuster,
+        preseed_by_name=preseed_by_name,
+    )
     elo_predictor.fit(history_matches)
     elo_preds = elo_predictor.predict_round(target_matches)
 
-    ml_predictor = MLPredictor(market, MLConfig(algorithm=ml_algo), enricher=enricher)
+    ml_predictor = MLPredictor(
+        market,
+        ml_config,
+        enricher=enricher,
+        lineup_adjuster=lineup_adjuster,
+        preseed_by_name=preseed_by_name,
+    )
     ml_predictor.fit(history_matches, vote_lookup=vote_lookup)
-    ml_preds = ml_predictor.predict_round(target_matches, vote_lookup=vote_lookup)
+    ml_preds = ml_predictor.predict_round(
+        target_matches,
+        vote_lookup=vote_lookup,
+        odds_lookup=odds_lookup,
+        odds_weight=odds_weight,
+    )
     weight = max(0.0, min(1.0, ensemble_weight))
     return ensemble_predictions(market, elo_preds, ml_preds, weight_primary=weight)
 
@@ -488,10 +631,16 @@ def print_market_report(
 
     doubles = sum(1 for item in bet_plan if item.bet_type == "double")
     singles = len(bet_plan) - doubles
+    parlay_prob = summary["all_correct_probability"]
+    parlay_pct = parlay_prob * 100
+    fair_multiplier = (1.0 / parlay_prob) if parlay_prob > 0 else float("inf")
     print(
         f"\nPlan: {singles} straight pick(s), {doubles} double-chance ticket(s) | "
-        f"expected hits {summary['expected_hits']} / {summary['matches']} | "
-        f"all-correct probability {summary['all_correct_probability'] * 100:.4f}%"
+        f"expected hits {summary['expected_hits']} / {summary['matches']}"
+    )
+    print(
+        f"Parlay probability (all {summary['matches']} legs hit): "
+        f"{parlay_pct:.4f}%  →  fair payout multiplier ≈ {fair_multiplier:,.1f}x"
     )
     if stake_info:
         print(
@@ -558,10 +707,45 @@ def main() -> int:
         mode = "ML training features" if args.enrich_features else "display only"
         progress(f"MLB enrichment enabled ({mode})")
 
+    lineup_adjuster: LineupAdjuster | None = None
+    if args.lineup_players or args.lineup_missing:
+        lineup_adjuster = LineupAdjuster(
+            players_path=Path(args.lineup_players) if args.lineup_players else None,
+            lineups_path=Path(args.lineup_missing) if args.lineup_missing else None,
+        )
+        if lineup_adjuster.has_data:
+            progress(
+                f"Lineup adjuster loaded: {sum(len(v) for v in lineup_adjuster.lineups.values())} round(s) of team-news"
+            )
+        else:
+            progress("  [warn] --lineup-missing file empty/absent; lineup adjuster idle")
+
+    soccer_preseed: dict[str, dict[str, float]] = {}
+    if args.external_history_dir:
+        ext_dir = Path(args.external_history_dir)
+        soccer_preseed = build_preseed(ext_dir)
+        if soccer_preseed:
+            team_count = sum(len(v) for v in soccer_preseed.values())
+            progress(
+                f"External history pre-seed: {team_count} teams across {len(soccer_preseed)} league(s) "
+                f"from {ext_dir}"
+            )
+        else:
+            progress(f"  [warn] --external-history-dir '{ext_dir}' produced no usable rows")
+
+    odds_lookup = load_odds_lookup(args.odds_file)
+    if odds_lookup and args.odds_weight <= 0.0:
+        progress("  [warn] --odds-file loaded but --odds-weight is 0; closing-odds blend disabled")
+    elif odds_lookup:
+        progress(
+            f"Closing-odds blend enabled: weight={args.odds_weight:.2f} on {len(odds_lookup)} match(es)"
+        )
+
     reports = []
     for key in market_keys:
         market = MARKETS[key]
         market_enricher = enricher if (enricher and market.key == "baseball") else None
+        market_preseed = soccer_preseed if market.key == "soccer" else None
         reports.append(
             run_market(
                 client=client,
@@ -578,6 +762,12 @@ def main() -> int:
                 enrich_features=args.enrich_features,
                 enrich_workers=args.enrich_workers,
                 top_n=args.top_n,
+                match_seqs=parse_match_seqs(args.match_seqs),
+                lineup_adjuster=lineup_adjuster,
+                preseed_by_name=market_preseed,
+                odds_lookup=odds_lookup,
+                odds_weight=args.odds_weight,
+                calibrate=not args.no_calibrate,
             )
         )
 

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir \"C:\\\\Projects\\\\Resume-builder\")",
+      "Read(//c/Projects/**)"
+    ]
+  }
+}

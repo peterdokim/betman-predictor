@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
+from betman_predictor.lineup_adjust import LineupAdjuster, NULL_PENALTY
 from betman_predictor.models import MarketDefinition, MatchRecord, Prediction
 
 
@@ -172,7 +173,8 @@ class FeatureBuilder:
         home_state = self._ensure_team(self._team_key(match.league_code, match.home_id))
         away_state = self._ensure_team(self._team_key(match.league_code, match.away_id))
 
-        elo_gap = home_state.elo + self.market.home_advantage - away_state.elo
+        ha = self.market.param_for(match.league_code, "home_advantage")
+        elo_gap = home_state.elo + ha - away_state.elo
         home_elo_c = home_state.elo - DEFAULT_ELO
         away_elo_c = away_state.elo - DEFAULT_ELO
 
@@ -288,10 +290,12 @@ class FeatureBuilder:
         home_state = self._ensure_team(self._team_key(match.league_code, match.home_id))
         away_state = self._ensure_team(self._team_key(match.league_code, match.away_id))
 
-        diff = home_state.elo + self.market.home_advantage - away_state.elo
+        ha = self.market.param_for(match.league_code, "home_advantage")
+        k = self.market.param_for(match.league_code, "k_factor")
+        diff = home_state.elo + ha - away_state.elo
         expected_home = 1.0 / (1.0 + 10 ** (-diff / 400.0))
         actual_home = SCORE_MAP[match.result_code]
-        delta = self.market.k_factor * (actual_home - expected_home)
+        delta = k * (actual_home - expected_home)
         home_state.elo += delta
         away_state.elo -= delta
 
@@ -326,6 +330,12 @@ class MLConfig:
     algorithm: str = "logreg"  # logreg | gbm
     form_window: int = DEFAULT_FORM_WINDOW
     blend_with_priors: float = 0.05  # mix toward training-set base rates
+    calibrate: bool = True            # isotonic per-class calibration on a holdout fold
+    calibration_holdout: float = 0.15  # last X% of training (chronologically) used for fit
+    min_samples_for_calibration: int = 200
+
+
+OddsLookup = dict[tuple[int, int], dict[str, float]]
 
 
 class MLPredictor:
@@ -336,6 +346,8 @@ class MLPredictor:
         market: MarketDefinition,
         config: Optional[MLConfig] = None,
         enricher: Optional[object] = None,
+        lineup_adjuster: Optional[LineupAdjuster] = None,
+        preseed_by_name: Optional[dict[str, dict[str, float]]] = None,
     ) -> None:
         if not sklearn_available():
             raise RuntimeError(
@@ -352,6 +364,47 @@ class MLPredictor:
         self.priors_: dict[str, float] = {}
         self.training_size = 0
         self.fitted = False
+        self.lineup_adjuster = lineup_adjuster
+        self.preseed_by_name = preseed_by_name or {}
+        self.calibrators_: dict[str, object] | None = None
+
+    def _bootstrap_preseed(self, matches: Iterable[MatchRecord]) -> None:
+        if not self.preseed_by_name:
+            return
+        for match in matches:
+            for league, tid, tname in (
+                (match.league_code, match.home_id, match.home_name),
+                (match.league_code, match.away_id, match.away_name),
+            ):
+                key = self.feature_builder._team_key(league, tid)
+                if key in self.feature_builder.team_state:
+                    continue
+                offset = self.preseed_by_name.get(league, {}).get(tname)
+                if offset is not None:
+                    state = self.feature_builder._ensure_team(key)
+                    state.elo = DEFAULT_ELO + float(offset)
+
+    def _build_pipeline(self):
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        if self.config.algorithm == "gbm":
+            from sklearn.ensemble import HistGradientBoostingClassifier
+
+            model = HistGradientBoostingClassifier(
+                max_depth=4,
+                learning_rate=0.06,
+                max_iter=400,
+                l2_regularization=1.0,
+                early_stopping=False,
+            )
+            return Pipeline([("clf", model)])
+
+        # solver=lbfgs handles multinomial automatically in modern sklearn;
+        # avoid the multi_class kwarg, which is deprecated in sklearn>=1.5.
+        model = LogisticRegression(solver="lbfgs", C=0.6, max_iter=2000)
+        return Pipeline([("scale", StandardScaler()), ("clf", model)])
 
     def fit(
         self,
@@ -359,14 +412,13 @@ class MLPredictor:
         vote_lookup: Optional[VoteLookup] = None,
     ) -> None:
         import numpy as np
-        from sklearn.linear_model import LogisticRegression
-        from sklearn.pipeline import Pipeline
-        from sklearn.preprocessing import StandardScaler
 
         ordered = sorted(
             (m for m in matches if m.result_code in self.market.result_codes),
             key=lambda m: (m.game_datetime or FALLBACK_DT, m.gm_ts, m.match_seq),
         )
+
+        self._bootstrap_preseed(ordered)
 
         X_rows: list[list[float]] = []
         y: list[str] = []
@@ -390,29 +442,49 @@ class MLPredictor:
         self.priors_ = {code: prior_counts.get(code, 0) / total for code in self.market.ordered_codes}
         self.training_size = total
 
+        calibrate = (
+            self.config.calibrate
+            and total >= self.config.min_samples_for_calibration
+            and 0.0 < self.config.calibration_holdout < 0.5
+        )
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            if self.config.algorithm == "gbm":
-                from sklearn.ensemble import HistGradientBoostingClassifier
+            if calibrate:
+                # Train base on chronological prefix, fit per-class isotonic on the held-out tail,
+                # then refit base on the full data so the production model uses every sample.
+                from sklearn.isotonic import IsotonicRegression
 
-                model = HistGradientBoostingClassifier(
-                    max_depth=4,
-                    learning_rate=0.06,
-                    max_iter=400,
-                    l2_regularization=1.0,
-                    early_stopping=False,
-                )
-                self.pipeline = Pipeline([("clf", model)])
+                split = int(round(total * (1.0 - self.config.calibration_holdout)))
+                split = max(1, min(total - 1, split))
+                X_train, X_cal = X[:split], X[split:]
+                y_train, y_cal = y_arr[:split], y_arr[split:]
+
+                base = self._build_pipeline()
+                # Guard: the holdout tail might miss a class; fall back to no calibration.
+                base.fit(X_train, y_train)
+                if len(set(y_cal.tolist())) < 2:
+                    calibrate = False
+
+                if calibrate:
+                    classes = list(base.named_steps["clf"].classes_)
+                    proba_cal = base.predict_proba(X_cal)
+                    self.calibrators_ = {}
+                    for cls_idx, cls in enumerate(classes):
+                        targets = (y_cal == cls).astype(np.float64)
+                        if targets.sum() == 0 or targets.sum() == len(targets):
+                            continue
+                        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+                        iso.fit(proba_cal[:, cls_idx], targets)
+                        self.calibrators_[cls] = iso
+
+                # Final model trained on everything.
+                self.pipeline = self._build_pipeline()
+                self.pipeline.fit(X, y_arr)
             else:
-                # solver=lbfgs handles multinomial automatically in modern sklearn;
-                # avoid the multi_class kwarg, which is deprecated in sklearn>=1.5.
-                model = LogisticRegression(
-                    solver="lbfgs",
-                    C=0.6,
-                    max_iter=2000,
-                )
-                self.pipeline = Pipeline([("scale", StandardScaler()), ("clf", model)])
-            self.pipeline.fit(X, y_arr)
+                self.calibrators_ = None
+                self.pipeline = self._build_pipeline()
+                self.pipeline.fit(X, y_arr)
 
         self.classes_ = tuple(self.pipeline.named_steps["clf"].classes_)
         self.fitted = True
@@ -421,6 +493,8 @@ class MLPredictor:
         self,
         matches: Iterable[MatchRecord],
         vote_lookup: Optional[VoteLookup] = None,
+        odds_lookup: Optional[OddsLookup] = None,
+        odds_weight: float = 0.0,
     ) -> list[Prediction]:
         if not self.fitted or self.pipeline is None:
             raise RuntimeError("MLPredictor must be fitted before predicting.")
@@ -428,7 +502,11 @@ class MLPredictor:
         import numpy as np
 
         vote_lookup = vote_lookup or {}
-        ordered = sorted(matches, key=lambda m: (m.match_seq, m.home_name, m.away_name))
+        odds_lookup = odds_lookup or {}
+        odds_weight = max(0.0, min(1.0, float(odds_weight)))
+        match_list = list(matches)
+        self._bootstrap_preseed(match_list)
+        ordered = sorted(match_list, key=lambda m: (m.match_seq, m.home_name, m.away_name))
 
         rows: list[list[float]] = []
         for match in ordered:
@@ -440,6 +518,17 @@ class MLPredictor:
 
         X = np.asarray(rows, dtype=np.float64)
         proba = self.pipeline.predict_proba(X)
+
+        # Per-class isotonic calibration (then renormalise per-row to keep simplex).
+        if self.calibrators_:
+            adjusted = proba.copy()
+            for cls_idx, cls in enumerate(self.classes_):
+                iso = self.calibrators_.get(cls)
+                if iso is not None:
+                    adjusted[:, cls_idx] = iso.transform(adjusted[:, cls_idx])
+            row_sums = adjusted.sum(axis=1, keepdims=True)
+            row_sums[row_sums <= 0] = 1.0
+            proba = adjusted / row_sums
 
         predictions: list[Prediction] = []
         blend = self.config.blend_with_priors
@@ -453,13 +542,68 @@ class MLPredictor:
                     probabilities[code] = (1.0 - blend) * probabilities[code] + blend * self.priors_.get(code, 0.0)
                 total = sum(probabilities.values()) or 1.0
                 probabilities = {code: prob / total for code, prob in probabilities.items()}
+
+            scope_tags: list[str] = [f"ml-{self.config.algorithm}-n{self.training_size}"]
+            if self.calibrators_:
+                scope_tags.append("iso")
+
+            # Closing-odds geometric blend (predict-time only).
+            if odds_weight > 0.0:
+                odds_row = odds_lookup.get((match.gm_ts, match.match_seq))
+                if odds_row:
+                    merged: dict[str, float] = {}
+                    for code in self.market.ordered_codes:
+                        p_model = max(probabilities.get(code, 0.0), 1e-9)
+                        p_odds = max(float(odds_row.get(code, 0.0)), 1e-9)
+                        merged[code] = (p_model ** (1.0 - odds_weight)) * (p_odds ** odds_weight)
+                    total = sum(merged.values()) or 1.0
+                    probabilities = {code: prob / total for code, prob in merged.items()}
+                    scope_tags.append(f"odds{odds_weight:.2f}")
+
             home_state = self.feature_builder.team_state.get(
                 f"{match.league_code}:{match.home_id}", _TeamState()
             )
             away_state = self.feature_builder.team_state.get(
                 f"{match.league_code}:{match.away_id}", _TeamState()
             )
-            rating_gap = home_state.elo + self.market.home_advantage - away_state.elo
+            home_elo = home_state.elo
+            away_elo = away_state.elo
+            ha = self.market.param_for(match.league_code, "home_advantage")
+
+            # Lineup-aware predict-time penalty: shift probabilities toward the
+            # team that has its key players, by decreasing the penalised side's
+            # implied probabilities through a logistic shift on the Elo gap.
+            if self.lineup_adjuster is not None:
+                penalty = self.lineup_adjuster.penalty_for(
+                    gm_ts=match.gm_ts,
+                    match_seq=match.match_seq,
+                    league_code=match.league_code,
+                    home_team=match.home_name,
+                    away_team=match.away_name,
+                )
+                if not penalty.is_empty:
+                    home_elo -= penalty.home_penalty
+                    away_elo -= penalty.away_penalty
+                    # Apply the gap shift as a softmax tilt on the 3-way distribution.
+                    # The shift is the *change* in expected home-score driven by the
+                    # net Elo penalty (away_penalty - home_penalty).
+                    net_shift = penalty.away_penalty - penalty.home_penalty
+                    if abs(net_shift) > 1e-6:
+                        new_diff = home_elo + ha - away_elo
+                        old_diff = new_diff - net_shift
+                        old_e = 1.0 / (1.0 + 10 ** (-old_diff / 400.0))
+                        new_e = 1.0 / (1.0 + 10 ** (-new_diff / 400.0))
+                        # Move proba mass between A (home win) and D (away win)
+                        # in proportion to the change in expected score; leave B (draw)
+                        # untouched, then renormalise.
+                        delta = new_e - old_e
+                        probabilities["A"] = max(probabilities.get("A", 0.0) + delta, 1e-6)
+                        probabilities["D"] = max(probabilities.get("D", 0.0) - delta, 1e-6)
+                        total = sum(probabilities.values()) or 1.0
+                        probabilities = {code: prob / total for code, prob in probabilities.items()}
+                        scope_tags.append("lineup")
+
+            rating_gap = home_elo + ha - away_elo
             pick_code = max(probabilities, key=probabilities.get)
             predictions.append(
                 Prediction(
@@ -467,10 +611,10 @@ class MLPredictor:
                     pick_code=pick_code,
                     pick_label=self.market.label_map[pick_code],
                     probabilities=probabilities,
-                    home_rating=home_state.elo,
-                    away_rating=away_state.elo,
+                    home_rating=home_elo,
+                    away_rating=away_elo,
                     rating_gap=rating_gap,
-                    sample_scope=f"ml-{self.config.algorithm}-n{self.training_size}",
+                    sample_scope="+".join(scope_tags),
                 )
             )
         return predictions

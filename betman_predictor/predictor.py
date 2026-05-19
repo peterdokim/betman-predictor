@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
+from betman_predictor.lineup_adjust import LineupAdjuster, NULL_PENALTY
 from betman_predictor.models import MarketDefinition, MatchRecord, Prediction, RoundReference
 
 
@@ -96,12 +97,22 @@ class HistoricalPredictor:
     FALLBACK_DATETIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
     SCORE_MAP = {"A": 1.0, "B": 0.5, "D": 0.0}
 
-    def __init__(self, market: MarketDefinition) -> None:
+    def __init__(
+        self,
+        market: MarketDefinition,
+        lineup_adjuster: LineupAdjuster | None = None,
+        preseed_by_name: dict[str, dict[str, float]] | None = None,
+    ) -> None:
         self.market = market
         self.team_ratings: dict[str, float] = {}
         self.samples: list[CalibrationSample] = []
         self.global_counts: Counter[str] = Counter()
         self.fitted = False
+        self.lineup_adjuster = lineup_adjuster
+        # preseed: {league_code: {team_name: elo_offset_from_1500}}
+        # Used to bootstrap teams that appear rarely in Betman history but have
+        # rich attack/defence data from external sources (football-data.co.uk).
+        self.preseed_by_name = preseed_by_name or {}
 
     def _team_key(self, league_code: str, team_id: str) -> str:
         return f"{league_code}:{team_id}"
@@ -117,8 +128,25 @@ class HistoricalPredictor:
     def _rating_gap(self, match: MatchRecord) -> tuple[float, float, float]:
         home_rating = self._get_rating(match.league_code, match.home_id)
         away_rating = self._get_rating(match.league_code, match.away_id)
-        diff = home_rating + self.market.home_advantage - away_rating
+        ha = self.market.param_for(match.league_code, "home_advantage")
+        diff = home_rating + ha - away_rating
         return home_rating, away_rating, diff
+
+    def _bootstrap_preseed(self, matches: Iterable[MatchRecord]) -> None:
+        """Pre-populate team_ratings from external attack/defence data, by team name."""
+        if not self.preseed_by_name:
+            return
+        for match in matches:
+            for league, tid, tname in (
+                (match.league_code, match.home_id, match.home_name),
+                (match.league_code, match.away_id, match.away_name),
+            ):
+                key = self._team_key(league, tid)
+                if key in self.team_ratings:
+                    continue
+                offset = self.preseed_by_name.get(league, {}).get(tname)
+                if offset is not None:
+                    self.team_ratings[key] = 1500.0 + float(offset)
 
     @staticmethod
     def _expected_home_score(diff: float) -> float:
@@ -134,6 +162,8 @@ class HistoricalPredictor:
             ),
         )
 
+        self._bootstrap_preseed(ordered)
+
         for index, match in enumerate(ordered):
             home_rating, away_rating, diff = self._rating_gap(match)
             self.samples.append(
@@ -148,7 +178,8 @@ class HistoricalPredictor:
 
             actual_home = self.SCORE_MAP[match.result_code or "B"]
             expected_home = self._expected_home_score(diff)
-            delta = self.market.k_factor * (actual_home - expected_home)
+            k = self.market.param_for(match.league_code, "k_factor")
+            delta = k * (actual_home - expected_home)
 
             self._set_rating(match.league_code, match.home_id, home_rating + delta)
             self._set_rating(match.league_code, match.away_id, away_rating - delta)
@@ -174,11 +205,13 @@ class HistoricalPredictor:
             code: (self.global_counts.get(code, 0) / priors_total) * self.market.prior_weight
             for code in self.market.ordered_codes
         }
+        bandwidth = self.market.param_for(league_code, "bandwidth")
+        recency_decay = self.market.param_for(league_code, "recency_decay")
 
         for sample in pool:
-            distance_weight = math.exp(-abs(sample.diff - diff) / self.market.bandwidth)
+            distance_weight = math.exp(-abs(sample.diff - diff) / bandwidth)
             age = total_seen - sample.order_index
-            recency_weight = self.market.recency_decay**age
+            recency_weight = recency_decay**age
             counts[sample.result_code] = counts.get(sample.result_code, 0.0) + (distance_weight * recency_weight)
 
         total = sum(counts.values()) or 1.0
@@ -189,10 +222,31 @@ class HistoricalPredictor:
         if not self.fitted:
             raise RuntimeError("Model must be fitted before predicting.")
 
+        match_list = list(matches)
+        self._bootstrap_preseed(match_list)
+
         predictions: list[Prediction] = []
-        for match in sorted(matches, key=lambda item: (item.match_seq, item.home_name, item.away_name)):
+        for match in sorted(match_list, key=lambda item: (item.match_seq, item.home_name, item.away_name)):
             home_rating, away_rating, diff = self._rating_gap(match)
+
+            penalty = NULL_PENALTY
+            if self.lineup_adjuster is not None:
+                penalty = self.lineup_adjuster.penalty_for(
+                    gm_ts=match.gm_ts,
+                    match_seq=match.match_seq,
+                    league_code=match.league_code,
+                    home_team=match.home_name,
+                    away_team=match.away_name,
+                )
+                if not penalty.is_empty:
+                    home_rating -= penalty.home_penalty
+                    away_rating -= penalty.away_penalty
+                    ha = self.market.param_for(match.league_code, "home_advantage")
+                    diff = home_rating + ha - away_rating
+
             probabilities, scope = self._estimate_probabilities(diff, match.league_code)
+            if not penalty.is_empty:
+                scope = f"{scope}+lineup"
             pick_code = max(probabilities, key=probabilities.get)
             predictions.append(
                 Prediction(

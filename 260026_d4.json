@@ -1,0 +1,337 @@
+{
+  "generated_at": "2026-05-05T11:50:43.303009+00:00",
+  "reports": [
+    {
+      "market": "soccer",
+      "market_name": "축구 승무패",
+      "gm_id": "G011",
+      "gm_ts": 260026,
+      "round_no": null,
+      "source": "override",
+      "history_rounds": 140,
+      "model": "ensemble",
+      "ml_algo": "logreg",
+      "double_chance_count": 4,
+      "expected_hit_summary": {
+        "matches": 14,
+        "expected_hits": 7.149,
+        "all_correct_probability": 5.240622481386055e-05
+      },
+      "stake": null,
+      "predictions": [
+        {
+          "match_seq": 1,
+          "league_name": "K리그1",
+          "game_date": "26.05.05 (화) 16:30",
+          "home_team": "김천상무",
+          "away_team": "울산HDFC",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "single",
+          "bet_label": "승",
+          "covered_codes": [
+            "A"
+          ],
+          "bet_probability": 37.01,
+          "probabilities": {
+            "승": 37.01,
+            "무": 27.32,
+            "패": 35.67
+          },
+          "rating_gap": 77.75,
+          "sample_scope": "ensemble(league+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 2,
+          "league_name": "K리그1",
+          "game_date": "26.05.05 (화) 16:30",
+          "home_team": "대전하나",
+          "away_team": "인천유나",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "single",
+          "bet_label": "승",
+          "covered_codes": [
+            "A"
+          ],
+          "bet_probability": 48.05,
+          "probabilities": {
+            "승": 48.05,
+            "무": 26.99,
+            "패": 24.96
+          },
+          "rating_gap": 69.0,
+          "sample_scope": "ensemble(league+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 3,
+          "league_name": "K리그1",
+          "game_date": "26.05.05 (화) 16:30",
+          "home_team": "강원FC",
+          "away_team": "포항스틸",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "single",
+          "bet_label": "승",
+          "covered_codes": [
+            "A"
+          ],
+          "bet_probability": 43.38,
+          "probabilities": {
+            "승": 43.38,
+            "무": 27.28,
+            "패": 29.34
+          },
+          "rating_gap": 32.09,
+          "sample_scope": "ensemble(league+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 4,
+          "league_name": "K리그1",
+          "game_date": "26.05.05 (화) 19:00",
+          "home_team": "FC서울",
+          "away_team": "FC안양",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "single",
+          "bet_label": "승",
+          "covered_codes": [
+            "A"
+          ],
+          "bet_probability": 48.37,
+          "probabilities": {
+            "승": 48.37,
+            "무": 24.62,
+            "패": 27.01
+          },
+          "rating_gap": 105.92,
+          "sample_scope": "ensemble(league+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 5,
+          "league_name": "J1백년구상리그",
+          "game_date": "26.05.06 (수) 13:00",
+          "home_team": "시미즈",
+          "away_team": "C오사카",
+          "pick": "패",
+          "pick_code": "D",
+          "bet_type": "double",
+          "bet_label": "12",
+          "covered_codes": [
+            "A",
+            "D"
+          ],
+          "bet_probability": 71.19,
+          "probabilities": {
+            "승": 34.01,
+            "무": 28.81,
+            "패": 37.18
+          },
+          "rating_gap": 55.0,
+          "sample_scope": "ensemble(market+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 6,
+          "league_name": "J1백년구상리그",
+          "game_date": "26.05.06 (수) 13:00",
+          "home_team": "V바렌나",
+          "away_team": "오카야마",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "double",
+          "bet_label": "12",
+          "covered_codes": [
+            "A",
+            "D"
+          ],
+          "bet_probability": 70.65,
+          "probabilities": {
+            "승": 35.5,
+            "무": 29.35,
+            "패": 35.15
+          },
+          "rating_gap": 55.0,
+          "sample_scope": "ensemble(market+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 7,
+          "league_name": "J1백년구상리그",
+          "game_date": "26.05.06 (수) 14:00",
+          "home_team": "나고야",
+          "away_team": "G오사카",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "double",
+          "bet_label": "12",
+          "covered_codes": [
+            "A",
+            "D"
+          ],
+          "bet_probability": 70.96,
+          "probabilities": {
+            "승": 37.18,
+            "무": 29.04,
+            "패": 33.77
+          },
+          "rating_gap": 55.0,
+          "sample_scope": "ensemble(market+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 8,
+          "league_name": "J1백년구상리그",
+          "game_date": "26.05.06 (수) 14:00",
+          "home_team": "후쿠오카",
+          "away_team": "교토상가",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "double",
+          "bet_label": "12",
+          "covered_codes": [
+            "A",
+            "D"
+          ],
+          "bet_probability": 70.9,
+          "probabilities": {
+            "승": 36.62,
+            "무": 29.1,
+            "패": 34.28
+          },
+          "rating_gap": 55.0,
+          "sample_scope": "ensemble(market+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 9,
+          "league_name": "J1백년구상리그",
+          "game_date": "26.05.06 (수) 15:00",
+          "home_team": "FC도쿄",
+          "away_team": "제프유나",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "single",
+          "bet_label": "승",
+          "covered_codes": [
+            "A"
+          ],
+          "bet_probability": 49.92,
+          "probabilities": {
+            "승": 49.92,
+            "무": 26.65,
+            "패": 23.42
+          },
+          "rating_gap": 55.0,
+          "sample_scope": "ensemble(market+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 10,
+          "league_name": "J1백년구상리그",
+          "game_date": "26.05.06 (수) 15:00",
+          "home_team": "산프히로",
+          "away_team": "비셀고베",
+          "pick": "패",
+          "pick_code": "D",
+          "bet_type": "single",
+          "bet_label": "패",
+          "covered_codes": [
+            "D"
+          ],
+          "bet_probability": 36.56,
+          "probabilities": {
+            "승": 35.05,
+            "무": 28.39,
+            "패": 36.56
+          },
+          "rating_gap": 55.0,
+          "sample_scope": "ensemble(market+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 11,
+          "league_name": "J1백년구상리그",
+          "game_date": "26.05.06 (수) 16:00",
+          "home_team": "가시마",
+          "away_team": "미토",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "single",
+          "bet_label": "승",
+          "covered_codes": [
+            "A"
+          ],
+          "bet_probability": 48.19,
+          "probabilities": {
+            "승": 48.19,
+            "무": 27.26,
+            "패": 24.55
+          },
+          "rating_gap": 55.0,
+          "sample_scope": "ensemble(market+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 12,
+          "league_name": "J1백년구상리그",
+          "game_date": "26.05.06 (수) 16:00",
+          "home_team": "마치다",
+          "away_team": "요코마리",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "single",
+          "bet_label": "승",
+          "covered_codes": [
+            "A"
+          ],
+          "bet_probability": 43.34,
+          "probabilities": {
+            "승": 43.34,
+            "무": 28.0,
+            "패": 28.66
+          },
+          "rating_gap": 55.0,
+          "sample_scope": "ensemble(market+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 13,
+          "league_name": "J1백년구상리그",
+          "game_date": "26.05.06 (수) 17:00",
+          "home_team": "가와사키",
+          "away_team": "도쿄베르",
+          "pick": "승",
+          "pick_code": "A",
+          "bet_type": "single",
+          "bet_label": "승",
+          "covered_codes": [
+            "A"
+          ],
+          "bet_probability": 39.97,
+          "probabilities": {
+            "승": 39.97,
+            "무": 28.77,
+            "패": 31.27
+          },
+          "rating_gap": 55.0,
+          "sample_scope": "ensemble(market+ml-logreg-n1956)"
+        },
+        {
+          "match_seq": 14,
+          "league_name": "J1백년구상리그",
+          "game_date": "26.05.06 (수) 19:00",
+          "home_team": "가시와",
+          "away_team": "우라와",
+          "pick": "패",
+          "pick_code": "D",
+          "bet_type": "single",
+          "bet_label": "패",
+          "covered_codes": [
+            "D"
+          ],
+          "bet_probability": 36.43,
+          "probabilities": {
+            "승": 35.22,
+            "무": 28.36,
+            "패": 36.43
+          },
+          "rating_gap": 55.0,
+          "sample_scope": "ensemble(market+ml-logreg-n1956)"
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +19,11 @@ class MarketDefinition:
     recency_decay: float
     min_same_league_samples: int
     prior_weight: float
+    # Per-league overrides, keyed on league_code, e.g. {"52": {"home_advantage": 60.0}}.
+    # Any of home_advantage/k_factor/bandwidth/recency_decay can be overridden.
+    league_overrides: dict[str, dict[str, float]] = field(
+        default_factory=dict, hash=False, compare=False
+    )
 
     @property
     def ordered_codes(self) -> tuple[str, ...]:
@@ -27,6 +32,13 @@ class MarketDefinition:
     @property
     def result_codes(self) -> set[str]:
         return set(self.label_map)
+
+    def param_for(self, league_code: str, name: str) -> float:
+        """Return league-specific value for `name` if defined, else the market default."""
+        override = self.league_overrides.get(league_code) or {}
+        if name in override:
+            return float(override[name])
+        return float(getattr(self, name))
 
 
 @dataclass(frozen=True)
